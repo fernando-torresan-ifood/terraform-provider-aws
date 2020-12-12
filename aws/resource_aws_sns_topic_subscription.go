@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awsutil"
-	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/structure"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awsutil"
+	"github.com/aws/aws-sdk-go/service/sns"
 )
 
 const awsSNSPendingConfirmationMessage = "pending confirmation"
@@ -32,19 +33,24 @@ func resourceAwsSnsTopicSubscription() *schema.Resource {
 			State: schema.ImportStatePassthrough,
 		},
 
+		Timeouts: &schema.ResourceTimeout{
+			Create: schema.DefaultTimeout(5 * time.Minute),
+		},
+
 		Schema: map[string]*schema.Schema{
 			"protocol": {
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
 				ValidateFunc: validation.StringInSlice([]string{
-					// email and email-json not supported
 					"application",
 					"http",
 					"https",
 					"lambda",
 					"sms",
 					"sqs",
+					"email",
+					"email-json",
 				}, true),
 			},
 			"endpoint": {
@@ -53,14 +59,16 @@ func resourceAwsSnsTopicSubscription() *schema.Resource {
 				ForceNew: true,
 			},
 			"endpoint_auto_confirms": {
-				Type:     schema.TypeBool,
-				Optional: true,
-				Default:  false,
+				Type:       schema.TypeBool,
+				Optional:   true,
+				Default:    false,
+				Deprecated: "endpoint_auto_confirms exists for historical compatibility and should not be used.",
 			},
 			"confirmation_timeout_in_minutes": {
-				Type:     schema.TypeInt,
-				Optional: true,
-				Default:  1,
+				Type:       schema.TypeInt,
+				Optional:   true,
+				Default:    1,
+				Deprecated: "confirmation_timeout_in_minutes exists for historical compatibility and should not be used.",
 			},
 			"topic_arn": {
 				Type:     schema.TypeString,
@@ -111,7 +119,7 @@ func resourceAwsSnsTopicSubscriptionCreate(d *schema.ResourceData, meta interfac
 	}
 
 	log.Printf("New subscription ARN: %s", *output.SubscriptionArn)
-	d.SetId(aws.StringValue(output.SubscriptionArn))
+	d.SetId(*output.SubscriptionArn)
 
 	// Write the ARN to the 'arn' field for export
 	d.Set("arn", output.SubscriptionArn)
@@ -228,13 +236,7 @@ func subscribeToSNSTopic(d *schema.ResourceData, snsconn *sns.SNS) (output *sns.
 	protocol := d.Get("protocol").(string)
 	endpoint := d.Get("endpoint").(string)
 	topic_arn := d.Get("topic_arn").(string)
-	endpoint_auto_confirms := d.Get("endpoint_auto_confirms").(bool)
-	confirmation_timeout_in_minutes := d.Get("confirmation_timeout_in_minutes").(int)
 	attributes := getResourceAttributes(d)
-
-	if strings.Contains(protocol, "http") && !endpoint_auto_confirms {
-		return nil, fmt.Errorf("Protocol http/https is only supported for endpoints which auto confirms!")
-	}
 
 	log.Printf("[DEBUG] SNS create topic subscription: %s (%s) @ '%s'", endpoint, protocol, topic_arn)
 
@@ -252,11 +254,11 @@ func subscribeToSNSTopic(d *schema.ResourceData, snsconn *sns.SNS) (output *sns.
 
 	log.Printf("[DEBUG] Finished subscribing to topic %s with subscription arn %s", topic_arn, *output.SubscriptionArn)
 
-	if strings.Contains(protocol, "http") && subscriptionHasPendingConfirmation(output.SubscriptionArn) {
+	if subscriptionHasPendingConfirmation(output.SubscriptionArn) {
 
 		log.Printf("[DEBUG] SNS create topic subscription is pending so fetching the subscription list for topic : %s (%s) @ '%s'", endpoint, protocol, topic_arn)
 
-		err = resource.Retry(time.Duration(confirmation_timeout_in_minutes)*time.Minute, func() *resource.RetryError {
+		err = resource.Retry(d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
 
 			subscription, err := findSubscriptionByNonID(d, snsconn)
 
@@ -265,7 +267,7 @@ func subscribeToSNSTopic(d *schema.ResourceData, snsconn *sns.SNS) (output *sns.
 			}
 
 			if subscription == nil {
-				return resource.RetryableError(fmt.Errorf("Endpoint (%s) did not autoconfirm the subscription for topic %s", endpoint, topic_arn))
+				return resource.RetryableError(fmt.Errorf("Endpoint (%s) did not confirm the subscription for topic %s", endpoint, topic_arn))
 			}
 
 			output.SubscriptionArn = subscription.SubscriptionArn
